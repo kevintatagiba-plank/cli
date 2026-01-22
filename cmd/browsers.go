@@ -29,7 +29,7 @@ import (
 // BrowsersService defines the subset of the Kernel SDK browser client that we use.
 // See https://github.com/kernel/kernel-go-sdk/blob/main/browser.go
 type BrowsersService interface {
-	Get(ctx context.Context, id string, opts ...option.RequestOption) (res *kernel.BrowserGetResponse, err error)
+	Get(ctx context.Context, id string, query kernel.BrowserGetParams, opts ...option.RequestOption) (res *kernel.BrowserGetResponse, err error)
 	List(ctx context.Context, query kernel.BrowserListParams, opts ...option.RequestOption) (res *pagination.OffsetPagination[kernel.BrowserListResponse], err error)
 	New(ctx context.Context, body kernel.BrowserNewParams, opts ...option.RequestOption) (res *kernel.BrowserNewResponse, err error)
 	Update(ctx context.Context, id string, body kernel.BrowserUpdateParams, opts ...option.RequestOption) (res *kernel.BrowserUpdateResponse, err error)
@@ -182,10 +182,14 @@ type BrowsersGetInput struct {
 }
 
 type BrowsersUpdateInput struct {
-	Identifier string
-	ProxyID    string
-	ClearProxy bool
-	Output     string
+	Identifier         string
+	ProxyID            string
+	ClearProxy         bool
+	ProfileID          string
+	ProfileName        string
+	ProfileSaveChanges BoolFlag
+	Viewport           string
+	Output             string
 }
 
 // BrowsersCmd is a cobra-independent command handler for browsers operations.
@@ -437,7 +441,7 @@ func (b BrowsersCmd) View(ctx context.Context, in BrowsersViewInput) error {
 		return fmt.Errorf("unsupported --output value: use 'json'")
 	}
 
-	browser, err := b.browsers.Get(ctx, in.Identifier)
+	browser, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -471,7 +475,7 @@ func (b BrowsersCmd) Get(ctx context.Context, in BrowsersGetInput) error {
 		return fmt.Errorf("unsupported --output value: use 'json'")
 	}
 
-	browser, err := b.browsers.Get(ctx, in.Identifier)
+	browser, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -517,9 +521,9 @@ func (b BrowsersCmd) Update(ctx context.Context, in BrowsersUpdateInput) error {
 		return fmt.Errorf("unsupported --output value: use 'json'")
 	}
 
-	// Validate that at least one update option is provided
-	if in.ProxyID == "" && !in.ClearProxy {
-		return fmt.Errorf("must specify --proxy-id or --clear-proxy")
+	// Validate profile selection: at most one of profile-id or profile-name must be provided
+	if in.ProfileID != "" && in.ProfileName != "" {
+		return fmt.Errorf("must specify at most one of --profile-id or --profile-name")
 	}
 
 	// Cannot specify both --proxy-id and --clear-proxy
@@ -527,20 +531,53 @@ func (b BrowsersCmd) Update(ctx context.Context, in BrowsersUpdateInput) error {
 		return fmt.Errorf("cannot specify both --proxy-id and --clear-proxy")
 	}
 
+	hasProxyChange := in.ProxyID != "" || in.ClearProxy
+	hasProfileChange := in.ProfileID != "" || in.ProfileName != ""
+	hasViewportChange := in.Viewport != ""
+
+	// Validate that at least one update option is provided
+	if !hasProxyChange && !hasProfileChange && !hasViewportChange {
+		return fmt.Errorf("must specify at least one of: --proxy-id, --clear-proxy, --profile-id, --profile-name, or --viewport")
+	}
+
 	params := kernel.BrowserUpdateParams{}
+
+	// Handle proxy changes
 	if in.ClearProxy {
-		// Set to empty string to remove proxy
 		params.ProxyID = kernel.Opt("")
 	} else if in.ProxyID != "" {
 		params.ProxyID = kernel.Opt(in.ProxyID)
 	}
 
-	if in.Output != "json" {
-		if in.ClearProxy {
-			pterm.Info.Printf("Removing proxy from browser %s...\n", in.Identifier)
-		} else {
-			pterm.Info.Printf("Updating browser %s with proxy %s...\n", in.Identifier, in.ProxyID)
+	// Handle profile changes
+	if hasProfileChange {
+		params.Profile = shared.BrowserProfileParam{
+			SaveChanges: kernel.Opt(in.ProfileSaveChanges.Value),
 		}
+		if in.ProfileID != "" {
+			params.Profile.ID = kernel.Opt(in.ProfileID)
+		} else if in.ProfileName != "" {
+			params.Profile.Name = kernel.Opt(in.ProfileName)
+		}
+	}
+
+	// Handle viewport changes
+	if hasViewportChange {
+		width, height, refreshRate, err := parseViewport(in.Viewport)
+		if err != nil {
+			return fmt.Errorf("invalid viewport format: %v", err)
+		}
+		params.Viewport = shared.BrowserViewportParam{
+			Width:  width,
+			Height: height,
+		}
+		if refreshRate > 0 {
+			params.Viewport.RefreshRate = kernel.Opt(refreshRate)
+		}
+	}
+
+	if in.Output != "json" {
+		pterm.Info.Printf("Updating browser %s...\n", in.Identifier)
 	}
 
 	browser, err := b.browsers.Update(ctx, in.Identifier, params)
@@ -552,11 +589,7 @@ func (b BrowsersCmd) Update(ctx context.Context, in BrowsersUpdateInput) error {
 		return util.PrintPrettyJSON(browser)
 	}
 
-	if in.ClearProxy {
-		pterm.Success.Printf("Removed proxy from browser %s\n", browser.SessionID)
-	} else {
-		pterm.Success.Printf("Updated browser %s with proxy %s\n", browser.SessionID, browser.ProxyID)
-	}
+	pterm.Success.Printf("Updated browser %s\n", browser.SessionID)
 	return nil
 }
 
@@ -574,7 +607,7 @@ func (b BrowsersCmd) LogsStream(ctx context.Context, in BrowsersLogsStreamInput)
 		pterm.Error.Println("logs service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -676,7 +709,7 @@ func (b BrowsersCmd) ComputerClickMouse(ctx context.Context, in BrowsersComputer
 		pterm.Error.Println("computer service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -705,7 +738,7 @@ func (b BrowsersCmd) ComputerMoveMouse(ctx context.Context, in BrowsersComputerM
 		pterm.Error.Println("computer service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -725,7 +758,7 @@ func (b BrowsersCmd) ComputerScreenshot(ctx context.Context, in BrowsersComputer
 		pterm.Error.Println("computer service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -761,7 +794,7 @@ func (b BrowsersCmd) ComputerTypeText(ctx context.Context, in BrowsersComputerTy
 		pterm.Error.Println("computer service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -781,7 +814,7 @@ func (b BrowsersCmd) ComputerPressKey(ctx context.Context, in BrowsersComputerPr
 		pterm.Error.Println("computer service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -808,7 +841,7 @@ func (b BrowsersCmd) ComputerScroll(ctx context.Context, in BrowsersComputerScro
 		pterm.Error.Println("computer service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -834,7 +867,7 @@ func (b BrowsersCmd) ComputerDragMouse(ctx context.Context, in BrowsersComputerD
 		pterm.Error.Println("computer service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -870,7 +903,7 @@ func (b BrowsersCmd) ComputerSetCursor(ctx context.Context, in BrowsersComputerS
 		pterm.Error.Println("computer service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -916,7 +949,7 @@ func (b BrowsersCmd) ReplaysList(ctx context.Context, in BrowsersReplaysListInpu
 		return fmt.Errorf("unsupported --output value: use 'json'")
 	}
 
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -950,7 +983,7 @@ func (b BrowsersCmd) ReplaysStart(ctx context.Context, in BrowsersReplaysStartIn
 		return fmt.Errorf("unsupported --output value: use 'json'")
 	}
 
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -976,7 +1009,7 @@ func (b BrowsersCmd) ReplaysStart(ctx context.Context, in BrowsersReplaysStartIn
 }
 
 func (b BrowsersCmd) ReplaysStop(ctx context.Context, in BrowsersReplaysStopInput) error {
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -989,7 +1022,7 @@ func (b BrowsersCmd) ReplaysStop(ctx context.Context, in BrowsersReplaysStopInpu
 }
 
 func (b BrowsersCmd) ReplaysDownload(ctx context.Context, in BrowsersReplaysDownloadInput) error {
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1074,7 +1107,7 @@ func (b BrowsersCmd) PlaywrightExecute(ctx context.Context, in BrowsersPlaywrigh
 		pterm.Error.Println("playwright service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1120,7 +1153,7 @@ func (b BrowsersCmd) ProcessExec(ctx context.Context, in BrowsersProcessExecInpu
 		pterm.Error.Println("process service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1187,7 +1220,7 @@ func (b BrowsersCmd) ProcessSpawn(ctx context.Context, in BrowsersProcessSpawnIn
 		pterm.Error.Println("process service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1226,7 +1259,7 @@ func (b BrowsersCmd) ProcessKill(ctx context.Context, in BrowsersProcessKillInpu
 		pterm.Error.Println("process service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1244,7 +1277,7 @@ func (b BrowsersCmd) ProcessStatus(ctx context.Context, in BrowsersProcessStatus
 		pterm.Error.Println("process service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1262,7 +1295,7 @@ func (b BrowsersCmd) ProcessStdin(ctx context.Context, in BrowsersProcessStdinIn
 		pterm.Error.Println("process service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1279,7 +1312,7 @@ func (b BrowsersCmd) ProcessStdoutStream(ctx context.Context, in BrowsersProcess
 		pterm.Error.Println("process service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1397,7 +1430,7 @@ func (b BrowsersCmd) FSNewDirectory(ctx context.Context, in BrowsersFSNewDirInpu
 		pterm.Error.Println("fs service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1417,7 +1450,7 @@ func (b BrowsersCmd) FSDeleteDirectory(ctx context.Context, in BrowsersFSDeleteD
 		pterm.Error.Println("fs service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1433,7 +1466,7 @@ func (b BrowsersCmd) FSDeleteFile(ctx context.Context, in BrowsersFSDeleteFileIn
 		pterm.Error.Println("fs service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1449,7 +1482,7 @@ func (b BrowsersCmd) FSDownloadDirZip(ctx context.Context, in BrowsersFSDownload
 		pterm.Error.Println("fs service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1486,7 +1519,7 @@ func (b BrowsersCmd) FSFileInfo(ctx context.Context, in BrowsersFSFileInfoInput)
 		pterm.Error.Println("fs service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1513,7 +1546,7 @@ func (b BrowsersCmd) FSListFiles(ctx context.Context, in BrowsersFSListFilesInpu
 		pterm.Error.Println("fs service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1547,7 +1580,7 @@ func (b BrowsersCmd) FSMove(ctx context.Context, in BrowsersFSMoveInput) error {
 		pterm.Error.Println("fs service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1563,7 +1596,7 @@ func (b BrowsersCmd) FSReadFile(ctx context.Context, in BrowsersFSReadFileInput)
 		pterm.Error.Println("fs service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1595,7 +1628,7 @@ func (b BrowsersCmd) FSSetPermissions(ctx context.Context, in BrowsersFSSetPerms
 		pterm.Error.Println("fs service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1618,7 +1651,7 @@ func (b BrowsersCmd) FSUpload(ctx context.Context, in BrowsersFSUploadInput) err
 		pterm.Error.Println("fs service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1676,7 +1709,7 @@ func (b BrowsersCmd) FSUploadZip(ctx context.Context, in BrowsersFSUploadZipInpu
 		pterm.Error.Println("fs service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1698,7 +1731,7 @@ func (b BrowsersCmd) FSWriteFile(ctx context.Context, in BrowsersFSWriteFileInpu
 		pterm.Error.Println("fs service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1731,7 +1764,7 @@ func (b BrowsersCmd) ExtensionsUpload(ctx context.Context, in BrowsersExtensions
 		pterm.Error.Println("browsers service not available")
 		return nil
 	}
-	br, err := b.browsers.Get(ctx, in.Identifier)
+	br, err := b.browsers.Get(ctx, in.Identifier, kernel.BrowserGetParams{})
 	if err != nil {
 		return util.CleanedUpSdkError{Err: err}
 	}
@@ -1859,7 +1892,14 @@ var browsersGetCmd = &cobra.Command{
 var browsersUpdateCmd = &cobra.Command{
 	Use:   "update <id>",
 	Short: "Update a browser session",
-	Long:  "Update a running browser session. Currently supports changing or removing the proxy.",
+	Long: `Update a running browser session.
+
+Supported operations:
+  - Change or remove proxy (--proxy-id or --clear-proxy)
+  - Load a profile into a session that doesn't have one (--profile-id or --profile-name)
+  - Change viewport dimensions (--viewport)
+
+Note: Profiles can only be loaded into sessions that don't already have a profile.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			return fmt.Errorf("missing required argument: browser ID\n\nUsage: kernel browsers update <id> [flags]")
@@ -1889,6 +1929,10 @@ func init() {
 	browsersUpdateCmd.Flags().StringP("output", "o", "", "Output format: json for raw API response")
 	browsersUpdateCmd.Flags().String("proxy-id", "", "ID of the proxy to use for the browser session")
 	browsersUpdateCmd.Flags().Bool("clear-proxy", false, "Remove the proxy from the browser session")
+	browsersUpdateCmd.Flags().String("profile-id", "", "Profile ID to load into the browser session (mutually exclusive with --profile-name)")
+	browsersUpdateCmd.Flags().String("profile-name", "", "Profile name to load into the browser session (mutually exclusive with --profile-id)")
+	browsersUpdateCmd.Flags().Bool("save-changes", false, "If set, save changes back to the profile when the session ends")
+	browsersUpdateCmd.Flags().String("viewport", "", "Browser viewport size (e.g., 1920x1080@25). Supported: 2560x1440@10, 1920x1080@25, 1920x1200@25, 1440x900@25, 1024x768@60, 1200x800@60")
 
 	browsersCmd.AddCommand(browsersListCmd)
 	browsersCmd.AddCommand(browsersCreateCmd)
@@ -2112,7 +2156,6 @@ func init() {
 	browsersCreateCmd.Flags().String("pool-id", "", "Browser pool ID to acquire from (mutually exclusive with --pool-name)")
 	browsersCreateCmd.Flags().String("pool-name", "", "Browser pool name to acquire from (mutually exclusive with --pool-id)")
 
-
 	// no flags for view; it takes a single positional argument
 }
 
@@ -2311,14 +2354,22 @@ func runBrowsersUpdate(cmd *cobra.Command, args []string) error {
 	out, _ := cmd.Flags().GetString("output")
 	proxyID, _ := cmd.Flags().GetString("proxy-id")
 	clearProxy, _ := cmd.Flags().GetBool("clear-proxy")
+	profileID, _ := cmd.Flags().GetString("profile-id")
+	profileName, _ := cmd.Flags().GetString("profile-name")
+	saveChanges, _ := cmd.Flags().GetBool("save-changes")
+	viewport, _ := cmd.Flags().GetString("viewport")
 
 	svc := client.Browsers
 	b := BrowsersCmd{browsers: &svc}
 	return b.Update(cmd.Context(), BrowsersUpdateInput{
-		Identifier: args[0],
-		ProxyID:    proxyID,
-		ClearProxy: clearProxy,
-		Output:     out,
+		Identifier:         args[0],
+		ProxyID:            proxyID,
+		ClearProxy:         clearProxy,
+		ProfileID:          profileID,
+		ProfileName:        profileName,
+		ProfileSaveChanges: BoolFlag{Set: cmd.Flags().Changed("save-changes"), Value: saveChanges},
+		Viewport:           viewport,
+		Output:             out,
 	})
 }
 
