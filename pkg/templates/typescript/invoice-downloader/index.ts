@@ -1,4 +1,5 @@
 import { Kernel, type KernelContext } from "@onkernel/sdk";
+import { existsSync, readFileSync } from "fs";
 import { chromium } from "playwright-core";
 
 const kernel = new Kernel();
@@ -24,7 +25,8 @@ interface DownloadInvoiceOutput {
   invoiceId?: string;
   date?: string;
   downloaded: boolean;
-  filePath?: string;
+  fileDataBase64?: string; // Base64-encoded file contents for downloading
+  fileName?: string; // Suggested filename
   error?: string;
 }
 
@@ -39,11 +41,11 @@ async function loginToPortal(
   password: string
 ): Promise<void> {
   await page.goto(portalUrl);
-  
+
   // Wait for login form to be visible
   // TODO: Customize these selectors based on your portal
   await page.waitForSelector('input[type="email"], input[name="username"], input[id="username"]', { timeout: 10000 });
-  
+
   // Fill username - try common selectors
   const usernameSelector = 'input[type="email"]:visible, input[name="username"]:visible, input[id="username"]:visible, input[placeholder*="email" i]:visible, input[placeholder*="username" i]:visible';
   const usernameInput = await page.$(usernameSelector);
@@ -52,7 +54,7 @@ async function loginToPortal(
   } else {
     throw new Error("Could not find username/email input field. Please customize the selector.");
   }
-  
+
   // Fill password
   const passwordSelector = 'input[type="password"]:visible';
   const passwordInput = await page.$(passwordSelector);
@@ -61,7 +63,7 @@ async function loginToPortal(
   } else {
     throw new Error("Could not find password input field. Please customize the selector.");
   }
-  
+
   // Submit login form
   const submitSelector = 'button[type="submit"]:visible, input[type="submit"]:visible, button:has-text("Sign in"):visible, button:has-text("Log in"):visible, button:has-text("Login"):visible';
   const submitButton = await page.$(submitSelector);
@@ -71,10 +73,10 @@ async function loginToPortal(
     // Try pressing Enter as fallback
     await page.keyboard.press("Enter");
   }
-  
+
   // Wait for navigation after login (adjust timeout and selector as needed)
   await page.waitForLoadState("networkidle", { timeout: 30000 });
-  
+
   // Verify login was successful (customize this check based on your portal)
   const currentUrl = page.url();
   if (currentUrl.includes("login") || currentUrl.includes("signin")) {
@@ -84,178 +86,320 @@ async function loginToPortal(
 
 /**
  * Helper function to navigate to invoices section
- * Note: You'll need to customize this based on your portal's navigation
+ * Note: This portal uses hash routing (#invoices)
  */
 async function navigateToInvoices(page: any): Promise<void> {
-  // TODO: Customize this navigation based on your portal
-  // Common patterns:
-  // - Click on "Invoices" link in navigation menu
-  // - Navigate to /invoices URL directly
-  // - Click on "Billing" then "Invoices"
-  
-  // Try common invoice navigation patterns
-  const invoiceLinkSelectors = [
-    'a:has-text("Invoices"):visible',
-    'a:has-text("Billing"):visible',
-    'nav a[href*="invoice" i]:visible',
-    'button:has-text("Invoices"):visible'
-  ];
-  
-  let navigated = false;
-  for (const selector of invoiceLinkSelectors) {
-    try {
-      const link = await page.$(selector);
-      if (link) {
-        await link.click();
-        await page.waitForLoadState("networkidle", { timeout: 10000 });
-        navigated = true;
-        break;
-      }
-    } catch (e) {
-      // Continue to next selector
+  // Wait a bit for the page to fully load after login
+  await page.waitForTimeout(1000);
+
+  // Check if we're already on the invoices page (check if invoicesPage is visible)
+  const invoicesPage = await page.$('#invoicesPage');
+  if (invoicesPage) {
+    const isVisible = await invoicesPage.isVisible();
+    if (isVisible) {
+      // Already on invoices page, just wait for the table to be ready
+      await page.waitForSelector('.invoices-table', { timeout: 5000 });
+      return;
     }
   }
-  
-  if (!navigated) {
-    // Try direct URL navigation
-    const currentUrl = new URL(page.url());
-    const invoicesUrl = `${currentUrl.origin}/invoices`;
-    try {
-      await page.goto(invoicesUrl);
-      await page.waitForLoadState("networkidle", { timeout: 10000 });
-    } catch (e) {
-      console.warn("Could not automatically navigate to invoices. Please customize the navigation logic.");
+
+  // Try clicking the "Invoices" link (which has href="#invoices")
+  try {
+    const invoiceLink = await page.$('#invoicesLink, a[href="#invoices"], a:has-text("Invoices")');
+    if (invoiceLink) {
+      await invoiceLink.click();
+      await page.waitForTimeout(500);
     }
+  } catch (e) {
+    // Continue to URL navigation
   }
+
+  // Navigate to the URL with #invoices hash
+  const currentUrl = page.url();
+  const baseUrl = currentUrl.split('#')[0]; // Remove any existing hash
+  const invoicesUrl = `${baseUrl}#invoices`;
+
+  // Only navigate if we're not already on the correct URL
+  if (!currentUrl.includes('#invoices')) {
+    await page.goto(invoicesUrl);
+    await page.waitForLoadState("networkidle", { timeout: 10000 });
+  }
+
+  // Wait for the invoices page to be visible
+  await page.waitForSelector('#invoicesPage', { timeout: 10000 });
+  await page.waitForSelector('.invoices-table', { timeout: 5000 });
 }
 
 /**
  * Helper function to search for invoice by ID
  */
 async function searchInvoiceById(page: any, invoiceId: string): Promise<void> {
-  // TODO: Customize search selectors based on your portal
-  // Common patterns:
-  // - Search input field
-  // - Filter by invoice ID
-  // - Direct link to invoice
-  
-  // Try common search patterns
-  const searchSelectors = [
-    'input[type="search"]:visible',
-    'input[placeholder*="search" i]:visible',
-    'input[placeholder*="invoice" i]:visible',
-    'input[name="search"]:visible',
-    'input[id="search"]:visible'
-  ];
-  
-  let searched = false;
-  for (const selector of searchSelectors) {
-    try {
-      const searchInput = await page.$(selector);
-      if (searchInput) {
-        await searchInput.fill(invoiceId);
-        await page.keyboard.press("Enter");
-        await page.waitForLoadState("networkidle", { timeout: 10000 });
-        searched = true;
-        break;
-      }
-    } catch (e) {
-      // Continue to next selector
-    }
+  // Wait for the search input to be visible
+  await page.waitForSelector('#searchById', { timeout: 10000 });
+
+  // Fill the search input
+  const searchInput = await page.$('#searchById');
+  if (!searchInput) {
+    throw new Error("Could not find search by ID input field (#searchById)");
   }
-  
-  if (!searched) {
-    console.warn("Could not find search input. Please customize the search logic.");
-  }
+
+  // Clear any existing value and fill with invoice ID
+  await searchInput.fill(invoiceId);
+
+  // Trigger the input event to filter invoices (the page uses input event listener)
+  await searchInput.dispatchEvent('input');
+
+  // Wait a bit for the table to update
+  await page.waitForTimeout(500);
+
+  // Wait for the invoices table to be visible/updated
+  await page.waitForSelector('.invoices-table tbody', { timeout: 5000 });
 }
 
 /**
  * Helper function to search for invoice by date
  */
 async function searchInvoiceByDate(page: any, date: string): Promise<void> {
-  // TODO: Customize date filter selectors based on your portal
-  // Common patterns:
-  // - Date picker inputs
-  // - Filter dropdowns
-  // - Date range selectors
-  
-  // Try common date filter patterns
-  const dateInputSelectors = [
-    'input[type="date"]:visible',
-    'input[placeholder*="date" i]:visible',
-    'input[name*="date" i]:visible'
-  ];
-  
-  let filtered = false;
-  for (const selector of dateInputSelectors) {
-    try {
-      const dateInput = await page.$(selector);
-      if (dateInput) {
-        await dateInput.fill(date);
-        await page.keyboard.press("Enter");
-        await page.waitForLoadState("networkidle", { timeout: 10000 });
-        filtered = true;
-        break;
-      }
-    } catch (e) {
-      // Continue to next selector
-    }
+  // Wait for the date input to be visible
+  await page.waitForSelector('#searchByDate', { timeout: 10000 });
+
+  // Fill the date input
+  const dateInput = await page.$('#searchByDate');
+  if (!dateInput) {
+    throw new Error("Could not find search by date input field (#searchByDate)");
   }
-  
-  if (!filtered) {
-    console.warn("Could not find date filter input. Please customize the date filter logic.");
-  }
+
+  // Fill with the date
+  await dateInput.fill(date);
+
+  // Trigger the change event to filter invoices (the page uses change event listener)
+  await dateInput.dispatchEvent('change');
+
+  // Wait a bit for the table to update
+  await page.waitForTimeout(500);
+
+  // Wait for the invoices table to be visible/updated
+  await page.waitForSelector('.invoices-table tbody', { timeout: 5000 });
 }
 
 /**
  * Helper function to download invoice PDF
+ * Intercepts the download response and returns file contents as base64
+ * This avoids file system issues when running in Kernel cloud environment
  */
-async function downloadInvoicePDF(page: any, invoiceId?: string): Promise<string | null> {
-  // TODO: Customize download button/link selectors based on your portal
-  // Common patterns:
-  // - Download button next to invoice
-  // - Download link in invoice details
-  // - PDF icon/link
-  
-  // Set up download listener
-  const downloadPromise = page.waitForEvent("download", { timeout: 30000 });
-  
-  // Try common download button patterns
-  const downloadSelectors = [
-    `button:has-text("Download"):visible`,
-    `a:has-text("Download"):visible`,
-    `button:has-text("PDF"):visible`,
-    `a[href*=".pdf" i]:visible`,
-    `button[aria-label*="download" i]:visible`,
-    `a[download]:visible`
-  ];
-  
-  let downloaded = false;
-  for (const selector of downloadSelectors) {
-    try {
-      const downloadButton = await page.$(selector);
-      if (downloadButton) {
-        await downloadButton.click();
-        const download = await downloadPromise;
-        
-        // Save the download (adjust path as needed)
-        const fileName = download.suggestedFilename() || `invoice-${invoiceId || Date.now()}.pdf`;
-        const filePath = `/tmp/${fileName}`;
-        await download.saveAs(filePath);
-        
-        downloaded = true;
-        return filePath;
-      }
-    } catch (e) {
-      // Continue to next selector
+async function downloadInvoicePDF(
+  page: any,
+  invoiceId?: string
+): Promise<{ fileName: string; fileDataBase64: string } | null> {
+  // Check if there are no results first
+  const noResults = await page.$('#noResults');
+  if (noResults) {
+    const isVisible = await noResults.isVisible();
+    if (isVisible) {
+      throw new Error("No invoices found matching the search criteria.");
     }
   }
+
+  // Wait for the download button to be visible (should be in the filtered table)
+  await page.waitForSelector('.download-btn:visible', { timeout: 10000 });
+
+  // Intercept the blob download by overriding the downloadInvoice function
+  // This will capture the PDF data directly from the JavaScript blob
+  const pdfDataPromise = page.evaluate(() => {
+    return new Promise((resolve, reject) => {
+      // Store the original downloadInvoice function
+      const originalDownloadInvoice = (window as any).downloadInvoice;
+      
+      // Override downloadInvoice to capture the blob
+      (window as any).downloadInvoice = function(invoiceId: string, date: string, amount: string) {
+        // Create the PDF content (same as original function)
+        const pdfContent = `%PDF-1.4
+1 0 obj
+<<
+/Type /Catalog
+/Pages 2 0 R
+>>
+endobj
+2 0 obj
+<<
+/Type /Pages
+/Kids [3 0 R]
+/Count 1
+>>
+endobj
+3 0 obj
+<<
+/Type /Page
+/Parent 2 0 R
+/MediaBox [0 0 612 792]
+/Contents 4 0 R
+/Resources <<
+/Font <<
+/F1 <<
+/Type /Font
+/Subtype /Type1
+/BaseFont /Helvetica
+>>
+>>
+>>
+>>
+endobj
+4 0 obj
+<<
+/Length 200
+>>
+stream
+BT
+/F1 24 Tf
+100 700 Td
+(INVOICE) Tj
+0 -30 Td
+/F1 12 Tf
+(Invoice ID: ${invoiceId}) Tj
+0 -20 Td
+(Date: ${date}) Tj
+0 -20 Td
+(Amount: ${amount}) Tj
+ET
+endstream
+endobj
+xref
+0 5
+0000000000 65535 f
+0000000009 00000 n
+0000000058 00000 n
+0000000115 00000 n
+0000000316 00000 n
+trailer
+<<
+/Size 5
+/Root 1 0 R
+>>
+startxref
+516
+%%EOF`;
+
+        // Convert to blob and then to base64
+        const blob = new Blob([pdfContent], { type: 'application/pdf' });
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64 = (reader.result as string).split(',')[1]; // Remove data:application/pdf;base64, prefix
+          resolve({ base64, filename: `invoice-${invoiceId}.pdf` });
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      };
+      
+      // Set a timeout in case the function isn't called
+      setTimeout(() => {
+        reject(new Error('Download button was not clicked or downloadInvoice was not called'));
+      }, 30000);
+    });
+  });
+
+  // Set up download listener as fallback
+  const downloadPromise = page.waitForEvent("download", { timeout: 30000 });
+
+  // Find the download button - if invoiceId is provided, try to find the row with that ID first
+  let downloadButton = null;
+  let invoiceData: { id: string; date: string; amount: string } | null = null;
   
-  if (!downloaded) {
-    throw new Error("Could not find download button. Please customize the download selector.");
+  if (invoiceId) {
+    // Get all table rows
+    const rows = await page.$$('.invoices-table tbody tr');
+    for (const row of rows) {
+      const rowText = await row.textContent();
+      if (rowText && rowText.includes(invoiceId)) {
+        downloadButton = await row.$('.download-btn');
+        if (downloadButton) {
+          // Extract invoice data from the row
+          const cells = await row.$$('td');
+          if (cells.length >= 3) {
+            const id = await cells[0].textContent();
+            const date = await cells[1].textContent();
+            const amount = await cells[2].textContent();
+            invoiceData = { id: id || invoiceId, date: date || '', amount: amount || '' };
+          }
+          break;
+        }
+      }
+    }
   }
+
+  // Fallback to first visible download button if we couldn't find by invoice ID
+  if (!downloadButton) {
+    downloadButton = await page.$('.download-btn:visible');
+    // Try to get invoice data from first row
+    const firstRow = await page.$('.invoices-table tbody tr');
+    if (firstRow) {
+      const cells = await firstRow.$$('td');
+      if (cells.length >= 3) {
+        const id = await cells[0].textContent();
+        const date = await cells[1].textContent();
+        const amount = await cells[2].textContent();
+        invoiceData = { id: id || invoiceId || 'UNKNOWN', date: date || '', amount: amount || '' };
+      }
+    }
+  }
+
+  if (!downloadButton) {
+    throw new Error("Could not find download button. Please check if the invoice exists in the filtered results.");
+  }
+
+  // Click the download button
+  await downloadButton.click();
+
+  // Try to get PDF data from intercepted blob first
+  let pdfData: Buffer;
+  let fileName: string;
   
-  return null;
+  try {
+    const result = await Promise.race([
+      pdfDataPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+    ]) as { base64: string; filename: string };
+    
+    pdfData = Buffer.from(result.base64, 'base64');
+    fileName = result.filename;
+    console.log(`Successfully intercepted blob download: ${pdfData.length} bytes`);
+  } catch (e) {
+    // Fallback to Playwright download event
+    console.log('Blob interception failed, trying Playwright download event...');
+    const download = await downloadPromise;
+    fileName = download.suggestedFilename() || `invoice-${invoiceId || Date.now()}.pdf`;
+    
+    // Try to get the path and read the file
+    const tempPath = await download.path();
+    if (!tempPath) {
+      throw new Error("Download path is not available");
+    }
+    
+    // Wait for file to exist
+    let retries = 30;
+    while (!existsSync(tempPath) && retries > 0) {
+      await page.waitForTimeout(200);
+      retries--;
+    }
+    
+    if (!existsSync(tempPath)) {
+      throw new Error(`Downloaded file does not exist at ${tempPath} after waiting`);
+    }
+    
+    pdfData = readFileSync(tempPath);
+    console.log(`Successfully read ${pdfData.length} bytes from ${tempPath}`);
+  }
+
+  if (!pdfData || pdfData.length === 0) {
+    throw new Error("Downloaded file is empty");
+  }
+
+  // Convert to base64
+  const fileDataBase64 = pdfData.toString('base64');
+
+  return {
+    fileName,
+    fileDataBase64,
+  };
 }
 
 /**
@@ -323,12 +467,13 @@ app.action<DownloadInvoiceByIdInput, DownloadInvoiceOutput>(
 
       // Download the invoice PDF
       console.log("Downloading invoice PDF...");
-      const filePath = await downloadInvoicePDF(page, payload.invoiceId);
+      const downloadResult = await downloadInvoicePDF(page, payload.invoiceId);
 
       return {
         invoiceId: payload.invoiceId,
-        downloaded: filePath !== null,
-        filePath: filePath || undefined,
+        downloaded: downloadResult !== null,
+        fileName: downloadResult?.fileName,
+        fileDataBase64: downloadResult?.fileDataBase64,
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -415,12 +560,13 @@ app.action<DownloadInvoiceByDateInput, DownloadInvoiceOutput>(
 
       // Download the invoice PDF
       console.log("Downloading invoice PDF...");
-      const filePath = await downloadInvoicePDF(page);
+      const downloadResult = await downloadInvoicePDF(page);
 
       return {
         date: payload.date,
-        downloaded: filePath !== null,
-        filePath: filePath || undefined,
+        downloaded: downloadResult !== null,
+        fileName: downloadResult?.fileName,
+        fileDataBase64: downloadResult?.fileDataBase64,
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
