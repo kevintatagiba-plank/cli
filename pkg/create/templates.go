@@ -19,6 +19,7 @@ const (
 	TemplateOpenAGIComputerUse   = "openagi-computer-use"
 	TemplateClaudeAgentSDK       = "claude-agent-sdk"
 	TemplateYutoriComputerUse    = "yutori-computer-use"
+	TemplateInvoiceDownloader     = "invoice-downloader"
 )
 
 type TemplateInfo struct {
@@ -89,6 +90,11 @@ var Templates = map[string]TemplateInfo{
 		Name:        "Yutori n1 Computer Use",
 		Description: "Implements a Yutori n1 computer use agent",
 		Languages:   []string{LanguageTypeScript, LanguagePython},
+	},
+	TemplateInvoiceDownloader: {
+		Name:        "Invoice Downloader",
+		Description: "Logs into vendor/billing portals and downloads invoices by ID or date",
+		Languages:   []string{LanguageTypeScript},
 	},
 }
 
@@ -212,6 +218,11 @@ var Commands = map[string]map[string]DeployConfig{
 			EntryPoint:    "index.ts",
 			NeedsEnvFile:  true,
 			InvokeCommand: `kernel invoke ts-yutori-cua cua-task --payload '{"query": "Navigate to https://example.com and describe the page"}'`,
+		},
+		TemplateInvoiceDownloader: {
+			EntryPoint:    "index.ts",
+			NeedsEnvFile:  true,
+			InvokeCommand: `kernel invoke ts-invoice-downloader download-invoice-by-id --payload '{"invoiceId": "INV-12345"}'`,
 		},
 	},
 	LanguagePython: {
