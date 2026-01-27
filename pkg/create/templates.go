@@ -64,7 +64,7 @@ var Templates = map[string]TemplateInfo{
 	TemplateGeminiComputerUse: {
 		Name:        "Gemini Computer Use",
 		Description: "Implements a Gemini computer use agent",
-		Languages:   []string{LanguageTypeScript},
+		Languages:   []string{LanguageTypeScript, LanguagePython},
 	},
 	TemplateBrowserUse: {
 		Name:        "Browser Use",
@@ -207,7 +207,7 @@ var Commands = map[string]map[string]DeployConfig{
 		TemplateGeminiComputerUse: {
 			EntryPoint:    "index.ts",
 			NeedsEnvFile:  true,
-			InvokeCommand: "kernel invoke ts-gemini-cua gemini-cua-task",
+			InvokeCommand: `kernel invoke ts-gemini-cua cua-task --payload '{"query": "Navigate to http://magnitasks.com and click on Tasks in the sidebar"}'`,
 		},
 		TemplateClaudeAgentSDK: {
 			EntryPoint:    "index.ts",
@@ -260,6 +260,11 @@ var Commands = map[string]map[string]DeployConfig{
 			EntryPoint:    "main.py",
 			NeedsEnvFile:  true,
 			InvokeCommand: `kernel invoke py-claude-agent-sdk agent-task --payload '{"task": "Go to https://news.ycombinator.com and get the top 3 stories"}'`,
+		},
+		TemplateGeminiComputerUse: {
+			EntryPoint:    "main.py",
+			NeedsEnvFile:  true,
+			InvokeCommand: `kernel invoke python-gemini-cua cua-task --payload '{"query": "Navigate to http://magnitasks.com and click on Tasks in the sidebar"}'`,
 		},
 		TemplateYutoriComputerUse: {
 			EntryPoint:    "main.py",
