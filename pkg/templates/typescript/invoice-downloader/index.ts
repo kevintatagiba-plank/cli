@@ -4,13 +4,21 @@ import type {
   DownloadInvoiceByDateInput,
   DownloadInvoiceOutput,
 } from "./types";
-import { PORTAL_URL } from "./config";
-import { executeInvoiceDownload } from "./handlers";
-import { searchInvoiceById, searchInvoiceByDate } from "./utils/search";
-import { downloadInvoicePDF } from "./utils/download";
+import { KernelBrowserSession } from "./session";
+import { invoiceDownloadLoop } from "./loop";
 
 const kernel = new Kernel();
 const app = kernel.app("ts-invoice-downloader");
+
+// Environment variables for portal credentials
+const PORTAL_URL = process.env.PORTAL_URL;
+const PORTAL_USERNAME = process.env.PORTAL_USERNAME;
+const PORTAL_PASSWORD = process.env.PORTAL_PASSWORD;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+
+if (!ANTHROPIC_API_KEY) {
+  throw new Error("ANTHROPIC_API_KEY is required");
+}
 
 app.action<DownloadInvoiceByIdInput, DownloadInvoiceOutput>(
   "download-invoice-by-id",
@@ -19,22 +27,46 @@ app.action<DownloadInvoiceByIdInput, DownloadInvoiceOutput>(
       throw new Error("invoiceId is required");
     }
 
-    const portalUrl = payload.portalUrl || PORTAL_URL!;
-    if (!portalUrl) {
-      throw new Error("PORTAL_URL is required (either in payload or environment variables)");
+    const portalUrl = payload.portalUrl || PORTAL_URL;
+    const username = payload.username || PORTAL_USERNAME;
+    const password = payload.password || PORTAL_PASSWORD;
+
+    if (!portalUrl) throw new Error("Portal URL is required");
+    if (!username) throw new Error("Username is required");
+    if (!password) throw new Error("Password is required");
+
+    const session = new KernelBrowserSession(kernel, {
+      stealth: true,
+      recordReplay: payload.recordReplay ?? false,
+    });
+
+    await session.start();
+    console.log("Browser live view:", session.liveViewUrl);
+
+    try {
+      const result = await invoiceDownloadLoop({
+        portalUrl,
+        username,
+        password,
+        invoiceIdentifier: payload.invoiceId,
+        identifierType: "id",
+        apiKey: ANTHROPIC_API_KEY,
+        kernel,
+        sessionId: session.sessionId,
+      });
+
+      const sessionInfo = await session.stop();
+
+      return {
+        invoiceId: payload.invoiceId,
+        success: result.success,
+        message: result.message,
+        replayUrl: sessionInfo.replayViewUrl,
+      };
+    } catch (error) {
+      await session.stop();
+      throw error;
     }
-
-    const result = await executeInvoiceDownload(
-      ctx,
-      portalUrl,
-      (page) => {
-        console.log(`Searching for invoice: ${payload.invoiceId}`);
-        return searchInvoiceById(page, payload.invoiceId);
-      },
-      (page) => downloadInvoicePDF(page, payload.invoiceId)
-    );
-
-    return { ...result, invoiceId: payload.invoiceId };
   }
 );
 
@@ -50,21 +82,45 @@ app.action<DownloadInvoiceByDateInput, DownloadInvoiceOutput>(
       throw new Error("date must be in YYYY-MM-DD format");
     }
 
-    const portalUrl = payload.portalUrl || PORTAL_URL!;
-    if (!portalUrl) {
-      throw new Error("PORTAL_URL is required (either in payload or environment variables)");
+    const portalUrl = payload.portalUrl || PORTAL_URL;
+    const username = payload.username || PORTAL_USERNAME;
+    const password = payload.password || PORTAL_PASSWORD;
+
+    if (!portalUrl) throw new Error("Portal URL is required");
+    if (!username) throw new Error("Username is required");
+    if (!password) throw new Error("Password is required");
+
+    const session = new KernelBrowserSession(kernel, {
+      stealth: true,
+      recordReplay: payload.recordReplay ?? false,
+    });
+
+    await session.start();
+    console.log("Browser live view:", session.liveViewUrl);
+
+    try {
+      const result = await invoiceDownloadLoop({
+        portalUrl,
+        username,
+        password,
+        invoiceIdentifier: payload.date,
+        identifierType: "date",
+        apiKey: ANTHROPIC_API_KEY,
+        kernel,
+        sessionId: session.sessionId,
+      });
+
+      const sessionInfo = await session.stop();
+
+      return {
+        date: payload.date,
+        success: result.success,
+        message: result.message,
+        replayUrl: sessionInfo.replayViewUrl,
+      };
+    } catch (error) {
+      await session.stop();
+      throw error;
     }
-
-    const result = await executeInvoiceDownload(
-      ctx,
-      portalUrl,
-      (page) => {
-        console.log(`Searching for invoice by date: ${payload.date}`);
-        return searchInvoiceByDate(page, payload.date);
-      },
-      (page) => downloadInvoicePDF(page)
-    );
-
-    return { ...result, date: payload.date };
   }
 );
